@@ -311,6 +311,23 @@ func NewListenerCache(
 	return listenerCache
 }
 
+func NewListenerCacheV2(
+	cacheConfig ListenerConfig,
+	statsListeners []*envoy_v3.AdminListenerV2,
+) *ListenerCache {
+	listenerCache := &ListenerCache{
+		Config:       cacheConfig,
+		staticValues: map[string]*envoy_listener_v3.Listener{},
+	}
+
+	for _, s := range statsListeners {
+		l := envoy_v3.EnvoyListener(*s)
+		listenerCache.staticValues[l.Name] = l
+	}
+
+	return listenerCache
+}
+
 // Update replaces the contents of the cache with the supplied map.
 func (c *ListenerCache) Update(v map[string]*envoy_config_listener_v3.Listener) {
 	c.mu.Lock()

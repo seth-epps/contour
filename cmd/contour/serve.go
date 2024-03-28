@@ -69,6 +69,7 @@ import (
 
 const (
 	initialDagBuildPollPeriod = 100 * time.Millisecond
+	adminListenerAddress      = "127.0.0.1"
 )
 
 // registerServe registers the serve subcommand and flags
@@ -492,8 +493,72 @@ func (s *Server) doServe() error {
 		endpointHandler = xdscache_v3.NewEndpointsTranslator(s.log.WithField("context", "endpointstranslator"))
 	}
 
+	var adminListenerConfigs []*envoy_v3.AdminListenerV2
+
+	switch {
+	case contourConfiguration.Envoy.Metrics.TLS == nil &&
+		(contourConfiguration.Envoy.Metrics.Address == contourConfiguration.Envoy.Health.Address) &&
+		(contourConfiguration.Envoy.Metrics.Port == contourConfiguration.Envoy.Health.Port):
+		adminListenerConfigs = append(
+			adminListenerConfigs,
+			envoy_v3.NewStatsListener(
+				contourConfiguration.Envoy.Metrics.Address,
+				contourConfiguration.Envoy.Metrics.Port,
+				envoy_v3.StatsRouting(),
+				envoy_v3.HealthRouting(),
+				envoy_v3.IgnoreOverloadManagerLimits(),
+			),
+		)
+	default:
+		metricsRequireClientCertificate := false
+		metricsUseTLS := contourConfiguration.Envoy.Metrics.TLS != nil
+		if metricsUseTLS {
+			metricsRequireClientCertificate = contourConfiguration.Envoy.Metrics.TLS.CAFile != ""
+		}
+		adminListenerConfigs = append(
+			adminListenerConfigs,
+			envoy_v3.NewStatsListener(
+				contourConfiguration.Envoy.Metrics.Address,
+				contourConfiguration.Envoy.Metrics.Port,
+				envoy_v3.StatsRouting(),
+				envoy_v3.MetricsUseTLS(metricsUseTLS),
+				envoy_v3.MetricsRequireCert(metricsRequireClientCertificate),
+				envoy_v3.IgnoreOverloadManagerLimits(),
+			),
+			envoy_v3.NewStatsListener(
+				contourConfiguration.Envoy.Health.Address,
+				contourConfiguration.Envoy.Health.Port,
+				envoy_v3.HealthRouting(),
+				envoy_v3.IgnoreOverloadManagerLimits(),
+			),
+		)
+	}
+
+	if contourConfiguration.Envoy.Network.EnvoyAdminPort != nil && *contourConfiguration.Envoy.Network.EnvoyAdminPort > 0 {
+		adminListenerConfigs = append(
+			adminListenerConfigs,
+			envoy_v3.NewStatsListener(
+				adminListenerAddress,
+				*contourConfiguration.Envoy.Network.EnvoyAdminPort,
+				envoy_v3.AdminRouting(),
+				envoy_v3.IgnoreOverloadManagerLimits(),
+			),
+		)
+	}
+
+	if s.ctx.Config.Reddit != nil && s.ctx.Config.Reddit.HealthListener != nil {
+		adminListenerConfigs = append(
+			adminListenerConfigs,
+			envoy_v3.NewStatsListener(
+				s.ctx.Config.Reddit.HealthListener.EnforceOMAddress,
+				s.ctx.Config.Reddit.HealthListener.EnforceOMPort,
+				envoy_v3.HealthRouting(),
+			),
+		)
+	}
+
 	resources := []xdscache.ResourceCache{
-		xdscache_v3.NewListenerCache(listenerConfig, *contourConfiguration.Envoy.Metrics, *contourConfiguration.Envoy.Health, *contourConfiguration.Envoy.Network.EnvoyAdminPort),
+		xdscache_v3.NewListenerCacheV2(listenerConfig, adminListenerConfigs),
 		xdscache_v3.NewSecretsCache(envoy_v3.StatsSecrets(contourConfiguration.Envoy.Metrics.TLS)),
 		&xdscache_v3.RouteCache{},
 		&xdscache_v3.ClusterCache{},

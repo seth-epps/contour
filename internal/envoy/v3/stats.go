@@ -14,6 +14,9 @@
 package v3
 
 import (
+	"slices"
+	"strings"
+
 	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_config_listener_v3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	envoy_config_route_v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -27,10 +30,26 @@ import (
 	"github.com/projectcontour/contour/internal/protobuf"
 )
 
+type listenerOption func(l *AdminListenerV2)
+type listenerClass string
+
 const (
-	metricsServerCertSDSName = "metrics-tls-certificate"
-	metricsCaBundleSDSName   = "metrics-ca-certificate"
+	statsClass  listenerClass = "stats"
+	healthClass listenerClass = "health"
+	adminClass  listenerClass = "envoy-admin"
 )
+
+type AdminListenerV2 struct {
+	address            string
+	port               int
+	classes            []listenerClass
+	metricsTLS         bool
+	metricsRequireCert bool
+	ignoreOMLimits     bool
+}
+
+const metricsServerCertSDSName = "metrics-tls-certificate"
+const metricsCaBundleSDSName = "metrics-ca-certificate"
 
 // StatsListeners returns an array of *envoy_config_listener_v3.Listeners,
 // either single HTTP listener or HTTP and HTTPS listeners depending on config.
@@ -85,7 +104,98 @@ func StatsListeners(metrics contour_v1alpha1.MetricsConfig, health contour_v1alp
 	return listeners
 }
 
-// AdminListener returns a *envoy_config_listener_v3.Listener configured to serve Envoy
+func NewStatsListener(address string, port int, opts ...listenerOption) *AdminListenerV2 {
+	l := &AdminListenerV2{
+		address: address,
+		port:    port,
+	}
+	for _, o := range opts {
+		o(l)
+	}
+
+	return l
+}
+
+func StatsRouting() listenerOption {
+	return func(l *AdminListenerV2) {
+		l.classes = append(l.classes, statsClass)
+	}
+}
+
+func HealthRouting() listenerOption {
+	return func(l *AdminListenerV2) {
+		l.classes = append(l.classes, healthClass)
+	}
+}
+
+func AdminRouting() listenerOption {
+	return func(l *AdminListenerV2) {
+		l.classes = append(l.classes, adminClass)
+	}
+}
+
+func MetricsUseTLS(useTLS bool) listenerOption {
+	return func(l *AdminListenerV2) {
+		l.metricsTLS = useTLS
+	}
+}
+
+func MetricsRequireCert(require bool) listenerOption {
+	return func(l *AdminListenerV2) {
+		l.metricsRequireCert = require
+	}
+}
+
+func IgnoreOverloadManagerLimits() listenerOption {
+	return func(l *AdminListenerV2) {
+		l.ignoreOMLimits = true
+	}
+}
+
+func EnvoyListener(stats AdminListenerV2) *envoy_listener_v3.Listener {
+	var tlsTransportSocket *envoy_core_v3.TransportSocket
+	if slices.Contains(stats.classes, statsClass) && stats.metricsTLS {
+		tlsTransportSocket = DownstreamTLSTransportSocket(
+			downstreamTLSContext(stats.metricsRequireCert))
+	}
+
+	var classesAsString []string
+	var prefixes []string
+	for _, cls := range stats.classes {
+		classesAsString = append(classesAsString, string(cls))
+		switch cls {
+		case statsClass:
+			prefixes = append(prefixes, "/stats")
+		case healthClass:
+			prefixes = append(prefixes, "/ready")
+		case adminClass:
+			prefixes = append(
+				prefixes,
+				"/certs",
+				"/clusters",
+				"/listeners",
+				"/config_dump",
+				"/memory",
+				"/ready",
+				"/runtime",
+				"/server_info",
+				"/stats",
+				"/stats/prometheus",
+				"/stats/recentlookups",
+			)
+		}
+	}
+
+	return &envoy_listener_v3.Listener{
+		Name:                  strings.Join(classesAsString, "-"),
+		Address:               SocketAddress(stats.address, stats.port),
+		SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
+		FilterChains:          filterChain("stats", tlsTransportSocket, routeForAdminInterface(prefixes...)),
+		IgnoreGlobalConnLimit: stats.ignoreOMLimits,
+	}
+}
+
+// AdminListener returns a *envoy_listener_v3.Listener configured to serve Envoy
 // debug routes from the admin webpage.
 func AdminListener(port int) *envoy_config_listener_v3.Listener {
 	return &envoy_config_listener_v3.Listener{
