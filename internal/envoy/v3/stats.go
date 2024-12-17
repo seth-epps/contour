@@ -31,6 +31,12 @@ import (
 	"github.com/projectcontour/contour/internal/protobuf"
 )
 
+// StatsListenerConfig holds properties used to construct different [*envoy_config_listener_v3.Listener]s
+// that can serve:
+//   - prometheus metrics on /stats (either over HTTP or HTTPS)
+//   - readiness/liveness probe on /ready (always over HTTP)
+//   - cherry-picked admin routes (always over HTTP)
+//
 type StatsListenerConfig struct {
 	address        string
 	port           int
@@ -42,6 +48,7 @@ type StatsListenerConfig struct {
 
 type (
 	listenerClass  string
+	// ListenerOption configures [StatsListenerConfig] properties
 	ListenerOption func(l *StatsListenerConfig)
 )
 
@@ -54,6 +61,8 @@ const (
 	adminClass   listenerClass = "envoy-admin"
 )
 
+// NewStatsListenerConfig constructs a [*StatsListenerConfig] for a given address and port. When multiple
+// routing [ListenerOption]s are be provided the resulting listener paths are joined
 func NewStatsListenerConfig(address string, port int, opts ...ListenerOption) *StatsListenerConfig {
 	l := &StatsListenerConfig{
 		address: address,
@@ -66,24 +75,46 @@ func NewStatsListenerConfig(address string, port int, opts ...ListenerOption) *S
 	return l
 }
 
+// MetricsRouting returns a [ListenerOption] that configures the following listener routes:
+//   - /stats
+//   - /stats/prometheus
+//
 func MetricsRouting() ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.classes = append(l.classes, metricsClass)
 	}
 }
 
+// HealthRouting returns a [ListenerOption] that configures the following listener routes:
+//   - /ready
+//
 func HealthRouting() ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.classes = append(l.classes, healthClass)
 	}
 }
 
+// AdminRouting returns a [ListenerOption] that configures the following listener routes:
+//   - /certs
+//   - /clusters
+//   - /listeners
+//   - /config_dump
+//   - /memory
+//   - /ready
+//   - /runtime
+//   - /server_info
+//   - /stats
+//   - /stats/prometheus
+//   - /stats/recentlookups"
+//
 func AdminRouting() ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.classes = append(l.classes, adminClass)
 	}
 }
 
+// MetricsTLS returns a [ListenerOption] that configures the DownstreamTlsContext when protecting metrics routes.
+// This only applies when used with [MetricsRouting].
 func MetricsTLS(caFile string) ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.metricsTLS = true
@@ -91,6 +122,8 @@ func MetricsTLS(caFile string) ListenerOption {
 	}
 }
 
+// IgnoreOverloadManagerLimits returns a [ListenerOption] that configures the listener to ignore downstream connection
+// limits configured by the overload manager.
 func IgnoreOverloadManagerLimits() ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.ignoreOMLimits = true
@@ -195,6 +228,9 @@ func AdminListener(port int) *envoy_config_listener_v3.Listener {
 	}
 }
 
+// ToEnvoy generates an envoy listener configuration. The resulting listener name is based on the different routing
+// [ListenerOption]s used to construct the [StatsListenerConfig]. Listener names are suffixed with [-om-enforced] unless
+// [IgnoreOverloadManagerLimits] is used.
 func (stats *StatsListenerConfig) ToEnvoy() *envoy_config_listener_v3.Listener {
 	if len(stats.classes) == 0 {
 		return nil
