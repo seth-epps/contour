@@ -36,7 +36,6 @@ import (
 //   - prometheus metrics on /stats (either over HTTP or HTTPS)
 //   - readiness/liveness probe on /ready (always over HTTP)
 //   - cherry-picked admin routes (always over HTTP)
-//
 type StatsListenerConfig struct {
 	address        string
 	port           int
@@ -47,7 +46,7 @@ type StatsListenerConfig struct {
 }
 
 type (
-	listenerClass  string
+	listenerClass string
 	// ListenerOption configures [StatsListenerConfig] properties
 	ListenerOption func(l *StatsListenerConfig)
 )
@@ -78,7 +77,6 @@ func NewStatsListenerConfig(address string, port int, opts ...ListenerOption) *S
 // MetricsRouting returns a [ListenerOption] that configures the following listener routes:
 //   - /stats
 //   - /stats/prometheus
-//
 func MetricsRouting() ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.classes = append(l.classes, metricsClass)
@@ -87,7 +85,6 @@ func MetricsRouting() ListenerOption {
 
 // HealthRouting returns a [ListenerOption] that configures the following listener routes:
 //   - /ready
-//
 func HealthRouting() ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.classes = append(l.classes, healthClass)
@@ -106,7 +103,6 @@ func HealthRouting() ListenerOption {
 //   - /stats
 //   - /stats/prometheus
 //   - /stats/recentlookups"
-//
 func AdminRouting() ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.classes = append(l.classes, adminClass)
@@ -127,104 +123,6 @@ func MetricsTLS(caFile string) ListenerOption {
 func IgnoreOverloadManagerLimits() ListenerOption {
 	return func(l *StatsListenerConfig) {
 		l.ignoreOMLimits = true
-	}
-}
-
-// StatsListeners returns an array of *envoy_config_listener_v3.Listeners,
-// either single HTTP listener or HTTP and HTTPS listeners depending on config.
-// The listeners are configured to serve:
-//   - prometheus metrics on /stats (either over HTTP or HTTPS)
-//   - readiness probe on /ready (always over HTTP)
-func StatsListeners(metrics contour_v1alpha1.MetricsConfig, health contour_v1alpha1.HealthConfig, omEnforcedHealth *contour_v1alpha1.HealthConfig) []*envoy_config_listener_v3.Listener {
-	var listeners []*envoy_config_listener_v3.Listener
-
-	switch {
-	// Create HTTPS listener for metrics and HTTP listener for health.
-	case metrics.TLS != nil:
-		listeners = []*envoy_config_listener_v3.Listener{{
-			Name:          "stats",
-			Address:       SocketAddress(metrics.Address, metrics.Port),
-			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains: filterChain("stats",
-				DownstreamTLSTransportSocket(
-					downstreamTLSContext(metrics.TLS.CAFile != "")), routeForAdminInterface("/stats", "/stats/prometheus")),
-			IgnoreGlobalConnLimit: true,
-		}, {
-			Name:                  "health",
-			Address:               SocketAddress(health.Address, health.Port),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains:          filterChain("stats", nil, routeForAdminInterface("/ready")),
-			IgnoreGlobalConnLimit: true,
-		}}
-
-	// Create combined HTTP listener for metrics and health.
-	case (metrics.Address == health.Address) &&
-		(metrics.Port == health.Port):
-		listeners = []*envoy_config_listener_v3.Listener{{
-			Name:          "stats-health",
-			Address:       SocketAddress(metrics.Address, metrics.Port),
-			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains: filterChain("stats", nil, routeForAdminInterface(
-				"/ready",
-				"/stats",
-				"/stats/prometheus",
-			)),
-			IgnoreGlobalConnLimit: true,
-		}}
-
-	// Create separate HTTP listeners for metrics and health.
-	default:
-		listeners = []*envoy_config_listener_v3.Listener{{
-			Name:                  "stats",
-			Address:               SocketAddress(metrics.Address, metrics.Port),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains:          filterChain("stats", nil, routeForAdminInterface("/stats", "/stats/prometheus")),
-			IgnoreGlobalConnLimit: true,
-		}, {
-			Name:                  "health",
-			Address:               SocketAddress(health.Address, health.Port),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains:          filterChain("stats", nil, routeForAdminInterface("/ready")),
-			IgnoreGlobalConnLimit: true,
-		}}
-	}
-
-	if omEnforcedHealth != nil {
-		listeners = append(listeners, &envoy_config_listener_v3.Listener{
-			Name:                  "health-om-enforced",
-			Address:               SocketAddress(omEnforcedHealth.Address, omEnforcedHealth.Port),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains:          filterChain("stats", nil, routeForAdminInterface("/ready")),
-			IgnoreGlobalConnLimit: false,
-		})
-	}
-
-	return listeners
-}
-
-// AdminListener returns a *envoy_config_listener_v3.Listener configured to serve Envoy
-// debug routes from the admin webpage.
-func AdminListener(port int) *envoy_config_listener_v3.Listener {
-	return &envoy_config_listener_v3.Listener{
-		Name:    "envoy-admin",
-		Address: SocketAddress("127.0.0.1", port),
-		FilterChains: filterChain("envoy-admin", nil,
-			routeForAdminInterface(
-				"/certs",
-				"/clusters",
-				"/listeners",
-				"/config_dump",
-				"/memory",
-				"/ready",
-				"/runtime",
-				"/server_info",
-				"/stats",
-				"/stats/prometheus",
-				"/stats/recentlookups",
-			),
-		),
-		SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-		IgnoreGlobalConnLimit: true,
 	}
 }
 
