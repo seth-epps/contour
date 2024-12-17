@@ -14,6 +14,9 @@
 package v3
 
 import (
+	"slices"
+	"strings"
+
 	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_config_listener_v3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	envoy_config_route_v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -28,91 +31,127 @@ import (
 	"github.com/projectcontour/contour/internal/protobuf"
 )
 
+// StatsListenerConfig holds properties used to construct different [*envoy_config_listener_v3.Listener]s
+// that can serve:
+//   - prometheus metrics on /stats (either over HTTP or HTTPS)
+//   - readiness/liveness probe on /ready (always over HTTP)
+//   - cherry-picked admin routes (always over HTTP)
+type StatsListenerConfig struct {
+	address        string
+	port           int
+	classes        []listenerClass
+	metricsTLS     bool
+	metricsCA      string
+	ignoreOMLimits bool
+}
+
+type (
+	listenerClass string
+	// ListenerOption configures [StatsListenerConfig] properties
+	ListenerOption func(l *StatsListenerConfig)
+)
+
 const (
 	metricsServerCertSDSName = "metrics-tls-certificate"
 	metricsCaBundleSDSName   = "metrics-ca-certificate"
+
+	metricsClass listenerClass = "stats" // `stats` retains the old listener naming conventions
+	healthClass  listenerClass = "health"
+	adminClass   listenerClass = "envoy-admin"
 )
 
-// StatsListeners returns an array of *envoy_config_listener_v3.Listeners,
-// either single HTTP listener or HTTP and HTTPS listeners depending on config.
-// The listeners are configured to serve:
-//   - prometheus metrics on /stats (either over HTTP or HTTPS)
-//   - readiness probe on /ready (always over HTTP)
-func StatsListeners(metrics contour_v1alpha1.MetricsConfig, health contour_v1alpha1.HealthConfig, omEnforcedHealth *contour_v1alpha1.HealthConfig) []*envoy_config_listener_v3.Listener {
-	var listeners []*envoy_config_listener_v3.Listener
-
-	switch {
-	// Create HTTPS listener for metrics and HTTP listener for health.
-	case metrics.TLS != nil:
-		listeners = []*envoy_config_listener_v3.Listener{{
-			Name:          "stats",
-			Address:       SocketAddress(metrics.Address, metrics.Port),
-			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains: filterChain("stats",
-				DownstreamTLSTransportSocket(
-					downstreamTLSContext(metrics.TLS.CAFile != "")), routeForAdminInterface("/stats", "/stats/prometheus")),
-			IgnoreGlobalConnLimit: true,
-		}, {
-			Name:                  "health",
-			Address:               SocketAddress(health.Address, health.Port),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains:          filterChain("stats", nil, routeForAdminInterface("/ready")),
-			IgnoreGlobalConnLimit: true,
-		}}
-
-	// Create combined HTTP listener for metrics and health.
-	case (metrics.Address == health.Address) &&
-		(metrics.Port == health.Port):
-		listeners = []*envoy_config_listener_v3.Listener{{
-			Name:          "stats-health",
-			Address:       SocketAddress(metrics.Address, metrics.Port),
-			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains: filterChain("stats", nil, routeForAdminInterface(
-				"/ready",
-				"/stats",
-				"/stats/prometheus",
-			)),
-			IgnoreGlobalConnLimit: true,
-		}}
-
-	// Create separate HTTP listeners for metrics and health.
-	default:
-		listeners = []*envoy_config_listener_v3.Listener{{
-			Name:                  "stats",
-			Address:               SocketAddress(metrics.Address, metrics.Port),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains:          filterChain("stats", nil, routeForAdminInterface("/stats", "/stats/prometheus")),
-			IgnoreGlobalConnLimit: true,
-		}, {
-			Name:                  "health",
-			Address:               SocketAddress(health.Address, health.Port),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains:          filterChain("stats", nil, routeForAdminInterface("/ready")),
-			IgnoreGlobalConnLimit: true,
-		}}
+// NewStatsListenerConfig constructs a [*StatsListenerConfig] for a given address and port. When multiple
+// routing [ListenerOption]s are be provided the resulting listener paths are joined
+func NewStatsListenerConfig(address string, port int, opts ...ListenerOption) *StatsListenerConfig {
+	l := &StatsListenerConfig{
+		address: address,
+		port:    port,
+	}
+	for _, o := range opts {
+		o(l)
 	}
 
-	if omEnforcedHealth != nil {
-		listeners = append(listeners, &envoy_config_listener_v3.Listener{
-			Name:                  "health-om-enforced",
-			Address:               SocketAddress(omEnforcedHealth.Address, omEnforcedHealth.Port),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			FilterChains:          filterChain("stats", nil, routeForAdminInterface("/ready")),
-			IgnoreGlobalConnLimit: false,
-		})
-	}
-
-	return listeners
+	return l
 }
 
-// AdminListener returns a *envoy_config_listener_v3.Listener configured to serve Envoy
-// debug routes from the admin webpage.
-func AdminListener(port int) *envoy_config_listener_v3.Listener {
-	return &envoy_config_listener_v3.Listener{
-		Name:    "envoy-admin",
-		Address: SocketAddress("127.0.0.1", port),
-		FilterChains: filterChain("envoy-admin", nil,
-			routeForAdminInterface(
+// MetricsRouting returns a [ListenerOption] that configures the following listener routes:
+//   - /stats
+//   - /stats/prometheus
+func MetricsRouting() ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.classes = append(l.classes, metricsClass)
+	}
+}
+
+// HealthRouting returns a [ListenerOption] that configures the following listener routes:
+//   - /ready
+func HealthRouting() ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.classes = append(l.classes, healthClass)
+	}
+}
+
+// AdminRouting returns a [ListenerOption] that configures the following listener routes:
+//   - /certs
+//   - /clusters
+//   - /listeners
+//   - /config_dump
+//   - /memory
+//   - /ready
+//   - /runtime
+//   - /server_info
+//   - /stats
+//   - /stats/prometheus
+//   - /stats/recentlookups"
+func AdminRouting() ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.classes = append(l.classes, adminClass)
+	}
+}
+
+// MetricsTLS returns a [ListenerOption] that configures the DownstreamTlsContext when protecting metrics routes.
+// This only applies when used with [MetricsRouting].
+func MetricsTLS(caFile string) ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.metricsTLS = true
+		l.metricsCA = caFile
+	}
+}
+
+// IgnoreOverloadManagerLimits returns a [ListenerOption] that configures the listener to ignore downstream connection
+// limits configured by the overload manager.
+func IgnoreOverloadManagerLimits() ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.ignoreOMLimits = true
+	}
+}
+
+// ToEnvoy generates an envoy listener configuration. The resulting listener name is based on the different routing
+// [ListenerOption]s used to construct the [StatsListenerConfig]. Listener names are suffixed with [-om-enforced] unless
+// [IgnoreOverloadManagerLimits] is used.
+func (stats *StatsListenerConfig) ToEnvoy() *envoy_config_listener_v3.Listener {
+	if len(stats.classes) == 0 {
+		return nil
+	}
+
+	var tlsTransportSocket *envoy_config_core_v3.TransportSocket
+	if slices.Contains(stats.classes, metricsClass) && stats.metricsTLS {
+		tlsTransportSocket = DownstreamTLSTransportSocket(
+			downstreamTLSContext(stats.metricsCA != ""))
+	}
+
+	var classesAsString []string
+	var prefixes []string
+	for _, cls := range stats.classes {
+		classesAsString = append(classesAsString, string(cls))
+		switch cls {
+		case metricsClass:
+			prefixes = append(prefixes, "/stats", "/stats/prometheus")
+		case healthClass:
+			prefixes = append(prefixes, "/ready")
+		case adminClass:
+			prefixes = append(
+				prefixes,
 				"/certs",
 				"/clusters",
 				"/listeners",
@@ -124,10 +163,25 @@ func AdminListener(port int) *envoy_config_listener_v3.Listener {
 				"/stats",
 				"/stats/prometheus",
 				"/stats/recentlookups",
-			),
-		),
+			)
+		}
+	}
+
+	// Strip duplicate routes prefixes
+	slices.Sort(prefixes)
+	prefixes = slices.Compact(prefixes)
+
+	listenerName := strings.Join(classesAsString, "-")
+	if !stats.ignoreOMLimits {
+		listenerName += "-om-enforced"
+	}
+
+	return &envoy_config_listener_v3.Listener{
+		Name:                  listenerName,
+		Address:               SocketAddress(stats.address, stats.port),
 		SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-		IgnoreGlobalConnLimit: true,
+		FilterChains:          filterChain("stats", tlsTransportSocket, routeForAdminInterface(prefixes...)),
+		IgnoreGlobalConnLimit: stats.ignoreOMLimits,
 	}
 }
 

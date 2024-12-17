@@ -30,484 +30,6 @@ import (
 	"github.com/projectcontour/contour/internal/protobuf"
 )
 
-func TestStatsListeners(t *testing.T) {
-	readyRoute := &envoy_config_route_v3.Route{
-		Match: &envoy_config_route_v3.RouteMatch{
-			PathSpecifier: &envoy_config_route_v3.RouteMatch_Path{
-				Path: "/ready",
-			},
-			Headers: []*envoy_config_route_v3.HeaderMatcher{
-				{
-					Name: ":method",
-					HeaderMatchSpecifier: &envoy_config_route_v3.HeaderMatcher_StringMatch{
-						StringMatch: &envoy_matcher_v3.StringMatcher{
-							IgnoreCase: true,
-							MatchPattern: &envoy_matcher_v3.StringMatcher_Exact{
-								Exact: "GET",
-							},
-						},
-					},
-				},
-			},
-		},
-		Action: &envoy_config_route_v3.Route_Route{
-			Route: &envoy_config_route_v3.RouteAction{
-				ClusterSpecifier: &envoy_config_route_v3.RouteAction_Cluster{
-					Cluster: "envoy-admin",
-				},
-			},
-		},
-	}
-
-	statsRoute := &envoy_config_route_v3.Route{
-		Match: &envoy_config_route_v3.RouteMatch{
-			PathSpecifier: &envoy_config_route_v3.RouteMatch_Path{
-				Path: "/stats",
-			},
-			Headers: []*envoy_config_route_v3.HeaderMatcher{
-				{
-					Name: ":method",
-					HeaderMatchSpecifier: &envoy_config_route_v3.HeaderMatcher_StringMatch{
-						StringMatch: &envoy_matcher_v3.StringMatcher{
-							IgnoreCase: true,
-							MatchPattern: &envoy_matcher_v3.StringMatcher_Exact{
-								Exact: "GET",
-							},
-						},
-					},
-				},
-			},
-		},
-		Action: &envoy_config_route_v3.Route_Route{
-			Route: &envoy_config_route_v3.RouteAction{
-				ClusterSpecifier: &envoy_config_route_v3.RouteAction_Cluster{
-					Cluster: "envoy-admin",
-				},
-			},
-		},
-	}
-
-	prometheusStatsRoute := &envoy_config_route_v3.Route{
-		Match: &envoy_config_route_v3.RouteMatch{
-			PathSpecifier: &envoy_config_route_v3.RouteMatch_Path{
-				Path: "/stats/prometheus",
-			},
-			Headers: []*envoy_config_route_v3.HeaderMatcher{
-				{
-					Name: ":method",
-					HeaderMatchSpecifier: &envoy_config_route_v3.HeaderMatcher_StringMatch{
-						StringMatch: &envoy_matcher_v3.StringMatcher{
-							IgnoreCase: true,
-							MatchPattern: &envoy_matcher_v3.StringMatcher_Exact{
-								Exact: "GET",
-							},
-						},
-					},
-				},
-			},
-		},
-		Action: &envoy_config_route_v3.Route_Route{
-			Route: &envoy_config_route_v3.RouteAction{
-				ClusterSpecifier: &envoy_config_route_v3.RouteAction_Cluster{
-					Cluster: "envoy-admin",
-				},
-			},
-		},
-	}
-
-	type testcase struct {
-		metrics        contour_v1alpha1.MetricsConfig
-		health         contour_v1alpha1.HealthConfig
-		omHealthConfig *contour_v1alpha1.HealthConfig
-		want           []*envoy_config_listener_v3.Listener
-	}
-
-	run := func(t *testing.T, name string, tc testcase) {
-		t.Helper()
-		t.Run(name, func(t *testing.T) {
-			t.Helper()
-			got := StatsListeners(tc.metrics, tc.health, tc.omHealthConfig)
-			protobuf.ExpectEqual(t, tc.want, got)
-		})
-	}
-
-	run(t, "stats-and-health-over-http-single-listener", testcase{
-		metrics:        contour_v1alpha1.MetricsConfig{Address: "127.0.0.127", Port: 8123},
-		health:         contour_v1alpha1.HealthConfig{Address: "127.0.0.127", Port: 8123},
-		omHealthConfig: nil,
-		want: []*envoy_config_listener_v3.Listener{{
-			Name:    "stats-health",
-			Address: SocketAddress("127.0.0.127", 8123),
-			FilterChains: FilterChains(
-				&envoy_config_listener_v3.Filter{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{readyRoute, statsRoute, prometheusStatsRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				},
-			),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: true,
-		}},
-	})
-
-	run(t, "stats-over-https-and-health-over-http", testcase{
-		metrics: contour_v1alpha1.MetricsConfig{
-			Address: "127.0.0.127",
-			Port:    8123,
-			TLS: &contour_v1alpha1.MetricsTLS{
-				CertFile: "certfile",
-				KeyFile:  "keyfile",
-			},
-		},
-		health: contour_v1alpha1.HealthConfig{
-			Address: "127.0.0.127",
-			Port:    8124,
-		},
-		omHealthConfig: nil,
-		want: []*envoy_config_listener_v3.Listener{{
-			Name:    "stats",
-			Address: SocketAddress("127.0.0.127", 8123),
-			FilterChains: []*envoy_config_listener_v3.FilterChain{{
-				Filters: []*envoy_config_listener_v3.Filter{{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{statsRoute, prometheusStatsRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				}},
-				TransportSocket: DownstreamTLSTransportSocket(
-					&envoy_transport_socket_tls_v3.DownstreamTlsContext{
-						CommonTlsContext: &envoy_transport_socket_tls_v3.CommonTlsContext{
-							TlsParams: &envoy_transport_socket_tls_v3.TlsParameters{
-								TlsMinimumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
-								TlsMaximumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
-							},
-							TlsCertificateSdsSecretConfigs: []*envoy_transport_socket_tls_v3.SdsSecretConfig{{
-								Name:      "metrics-tls-certificate",
-								SdsConfig: ConfigSource("contour"),
-							}},
-						},
-					},
-				),
-			}},
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: true,
-		}, {
-			Name:    "health",
-			Address: SocketAddress("127.0.0.127", 8124),
-			FilterChains: FilterChains(
-				&envoy_config_listener_v3.Filter{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{readyRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				},
-			),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: true,
-		}},
-	})
-
-	run(t, "stats-over-https-with-client-auth-and-health-over-http", testcase{
-		metrics: contour_v1alpha1.MetricsConfig{
-			Address: "127.0.0.127",
-			Port:    8123,
-			TLS: &contour_v1alpha1.MetricsTLS{
-				CertFile: "certfile",
-				KeyFile:  "keyfile",
-				CAFile:   "cabundle",
-			},
-		},
-		health: contour_v1alpha1.HealthConfig{
-			Address: "127.0.0.127",
-			Port:    8124,
-		},
-		omHealthConfig: nil,
-		want: []*envoy_config_listener_v3.Listener{{
-			Name:    "stats",
-			Address: SocketAddress("127.0.0.127", 8123),
-			FilterChains: []*envoy_config_listener_v3.FilterChain{{
-				Filters: []*envoy_config_listener_v3.Filter{{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{statsRoute, prometheusStatsRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				}},
-				TransportSocket: DownstreamTLSTransportSocket(
-					&envoy_transport_socket_tls_v3.DownstreamTlsContext{
-						CommonTlsContext: &envoy_transport_socket_tls_v3.CommonTlsContext{
-							TlsParams: &envoy_transport_socket_tls_v3.TlsParameters{
-								TlsMinimumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
-								TlsMaximumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
-							},
-							TlsCertificateSdsSecretConfigs: []*envoy_transport_socket_tls_v3.SdsSecretConfig{{
-								Name:      "metrics-tls-certificate",
-								SdsConfig: ConfigSource("contour"),
-							}},
-							ValidationContextType: &envoy_transport_socket_tls_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
-								ValidationContextSdsSecretConfig: &envoy_transport_socket_tls_v3.SdsSecretConfig{
-									Name:      "metrics-ca-certificate",
-									SdsConfig: ConfigSource("contour"),
-								},
-							},
-						},
-						RequireClientCertificate: wrapperspb.Bool(true),
-					},
-				),
-			}},
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: true,
-		}, {
-			Name:    "health",
-			Address: SocketAddress("127.0.0.127", 8124),
-			FilterChains: FilterChains(
-				&envoy_config_listener_v3.Filter{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{readyRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				},
-			),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: true,
-		}},
-	})
-
-	run(t, "stats-and-health-over-http-but-different-listeners", testcase{
-		metrics: contour_v1alpha1.MetricsConfig{
-			Address: "127.0.0.127",
-			Port:    8123,
-		},
-		health: contour_v1alpha1.HealthConfig{
-			Address: "127.0.0.128",
-			Port:    8124,
-		},
-		omHealthConfig: nil,
-		want: []*envoy_config_listener_v3.Listener{{
-			Name:    "stats",
-			Address: SocketAddress("127.0.0.127", 8123),
-			FilterChains: FilterChains(
-				&envoy_config_listener_v3.Filter{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{statsRoute, prometheusStatsRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				},
-			),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: true,
-		}, {
-			Name:    "health",
-			Address: SocketAddress("127.0.0.128", 8124),
-			FilterChains: FilterChains(
-				&envoy_config_listener_v3.Filter{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{readyRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				},
-			),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: true,
-		}},
-	})
-
-	run(t, "stats-and-health-over-http-single-listener-with-om-enforced-health-listener", testcase{
-		metrics:        contour_v1alpha1.MetricsConfig{Address: "127.0.0.127", Port: 8123},
-		health:         contour_v1alpha1.HealthConfig{Address: "127.0.0.127", Port: 8123},
-		omHealthConfig: &contour_v1alpha1.HealthConfig{Address: "127.0.0.127", Port: 8124},
-		want: []*envoy_config_listener_v3.Listener{{
-			Name:    "stats-health",
-			Address: SocketAddress("127.0.0.127", 8123),
-			FilterChains: FilterChains(
-				&envoy_config_listener_v3.Filter{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{readyRoute, statsRoute, prometheusStatsRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				},
-			),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: true,
-		}, {
-			Name:    "health-om-enforced",
-			Address: SocketAddress("127.0.0.127", 8124),
-			FilterChains: FilterChains(
-				&envoy_config_listener_v3.Filter{
-					Name: wellknown.HTTPConnectionManager,
-					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
-						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
-							StatPrefix: "stats",
-							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
-								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
-									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
-										Name:    "backend",
-										Domains: []string{"*"},
-										Routes:  []*envoy_config_route_v3.Route{readyRoute},
-									}},
-								},
-							},
-							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
-								Name: wellknown.Router,
-								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
-									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
-								},
-							}},
-							NormalizePath: wrapperspb.Bool(true),
-						}),
-					},
-				},
-			),
-			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
-			IgnoreGlobalConnLimit: false,
-		}},
-	})
-}
-
 func TestStatsTLSSecrets(t *testing.T) {
 	type testcase struct {
 		metricsTLS contour_v1alpha1.MetricsTLS
@@ -579,5 +101,355 @@ func TestStatsTLSSecrets(t *testing.T) {
 				},
 			},
 		}},
+	})
+}
+
+func TestNewStatsListenerConfig(t *testing.T) {
+	route := func(path string) *envoy_config_route_v3.Route {
+		return &envoy_config_route_v3.Route{
+			Match: &envoy_config_route_v3.RouteMatch{
+				PathSpecifier: &envoy_config_route_v3.RouteMatch_Path{
+					Path: path,
+				},
+				Headers: []*envoy_config_route_v3.HeaderMatcher{
+					{
+						Name: ":method",
+						HeaderMatchSpecifier: &envoy_config_route_v3.HeaderMatcher_StringMatch{
+							StringMatch: &envoy_matcher_v3.StringMatcher{
+								IgnoreCase: true,
+								MatchPattern: &envoy_matcher_v3.StringMatcher_Exact{
+									Exact: "GET",
+								},
+							},
+						},
+					},
+				},
+			},
+			Action: &envoy_config_route_v3.Route_Route{
+				Route: &envoy_config_route_v3.RouteAction{
+					ClusterSpecifier: &envoy_config_route_v3.RouteAction_Cluster{
+						Cluster: "envoy-admin",
+					},
+				},
+			},
+		}
+	}
+
+	type testcase struct {
+		address string
+		port    int
+		opts    []ListenerOption
+		want    *envoy_config_listener_v3.Listener
+	}
+
+	run := func(t *testing.T, name string, tc testcase) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			t.Helper()
+			got := NewStatsListenerConfig(tc.address, tc.port, tc.opts...)
+			protobuf.ExpectEqual(t, tc.want, got.ToEnvoy())
+		})
+	}
+
+	run(t, "no-routes", testcase{
+		address: "",
+		port:    1,
+		want:    nil,
+	})
+
+	run(t, "metrics-routes", testcase{
+		address: "127.0.0.127",
+		port:    8123,
+		opts:    []ListenerOption{MetricsRouting()},
+		want: &envoy_config_listener_v3.Listener{
+			Name:    "stats-om-enforced",
+			Address: SocketAddress("127.0.0.127", 8123),
+			FilterChains: FilterChains(
+				&envoy_config_listener_v3.Filter{
+					Name: wellknown.HTTPConnectionManager,
+					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
+						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
+							StatPrefix: "stats",
+							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
+								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
+									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
+										Name:    "backend",
+										Domains: []string{"*"},
+										Routes:  []*envoy_config_route_v3.Route{route("/stats"), route("/stats/prometheus")},
+									}},
+								},
+							},
+							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
+								Name: wellknown.Router,
+								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
+									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
+								},
+							}},
+							NormalizePath: wrapperspb.Bool(true),
+						}),
+					},
+				},
+			),
+			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
+		},
+	})
+
+	run(t, "metrics-health-routes", testcase{
+		address: "127.0.0.127",
+		port:    8123,
+		opts:    []ListenerOption{MetricsRouting(), HealthRouting()},
+		want: &envoy_config_listener_v3.Listener{
+			Name:    "stats-health-om-enforced",
+			Address: SocketAddress("127.0.0.127", 8123),
+			FilterChains: FilterChains(
+				&envoy_config_listener_v3.Filter{
+					Name: wellknown.HTTPConnectionManager,
+					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
+						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
+							StatPrefix: "stats",
+							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
+								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
+									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
+										Name:    "backend",
+										Domains: []string{"*"},
+										Routes:  []*envoy_config_route_v3.Route{route("/ready"), route("/stats"), route("/stats/prometheus")},
+									}},
+								},
+							},
+							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
+								Name: wellknown.Router,
+								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
+									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
+								},
+							}},
+							NormalizePath: wrapperspb.Bool(true),
+						}),
+					},
+				},
+			),
+			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
+		},
+	})
+
+	run(t, "metrics-health-admin-routes", testcase{
+		address: "127.0.0.127",
+		port:    8123,
+		opts:    []ListenerOption{MetricsRouting(), HealthRouting(), AdminRouting()},
+		want: &envoy_config_listener_v3.Listener{
+			Name:    "stats-health-envoy-admin-om-enforced",
+			Address: SocketAddress("127.0.0.127", 8123),
+			FilterChains: FilterChains(
+				&envoy_config_listener_v3.Filter{
+					Name: wellknown.HTTPConnectionManager,
+					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
+						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
+							StatPrefix: "stats",
+							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
+								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
+									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
+										Name:    "backend",
+										Domains: []string{"*"},
+										Routes: []*envoy_config_route_v3.Route{
+											route("/certs"),
+											route("/clusters"),
+											route("/config_dump"),
+											route("/listeners"),
+											route("/memory"),
+											route("/ready"),
+											route("/runtime"),
+											route("/server_info"),
+											route("/stats"),
+											route("/stats/prometheus"),
+											route("/stats/recentlookups"),
+										},
+									}},
+								},
+							},
+							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
+								Name: wellknown.Router,
+								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
+									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
+								},
+							}},
+							NormalizePath: wrapperspb.Bool(true),
+						}),
+					},
+				},
+			),
+			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
+		},
+	})
+
+	run(t, "metric-routes-tls-with-no-ca", testcase{
+		address: "127.0.0.127",
+		port:    8123,
+		opts:    []ListenerOption{MetricsRouting(), MetricsTLS("")},
+		want: &envoy_config_listener_v3.Listener{
+			Name:    "stats-om-enforced",
+			Address: SocketAddress("127.0.0.127", 8123),
+			FilterChains: []*envoy_config_listener_v3.FilterChain{{
+				Filters: []*envoy_config_listener_v3.Filter{{
+					Name: wellknown.HTTPConnectionManager,
+					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
+						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
+							StatPrefix: "stats",
+							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
+								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
+									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
+										Name:    "backend",
+										Domains: []string{"*"},
+										Routes:  []*envoy_config_route_v3.Route{route("/stats"), route("/stats/prometheus")},
+									}},
+								},
+							},
+							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
+								Name: wellknown.Router,
+								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
+									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
+								},
+							}},
+							NormalizePath: wrapperspb.Bool(true),
+						}),
+					},
+				}},
+				TransportSocket: DownstreamTLSTransportSocket(
+					&envoy_transport_socket_tls_v3.DownstreamTlsContext{
+						CommonTlsContext: &envoy_transport_socket_tls_v3.CommonTlsContext{
+							TlsParams: &envoy_transport_socket_tls_v3.TlsParameters{
+								TlsMinimumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
+								TlsMaximumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
+							},
+							TlsCertificateSdsSecretConfigs: []*envoy_transport_socket_tls_v3.SdsSecretConfig{{
+								Name:      "metrics-tls-certificate",
+								SdsConfig: ConfigSource("contour"),
+							}},
+						},
+					},
+				),
+			}},
+			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
+		},
+	})
+
+	run(t, "metric-routes-tls-with-ca", testcase{
+		address: "127.0.0.127",
+		port:    8123,
+		opts:    []ListenerOption{MetricsRouting(), MetricsTLS("cabundle")},
+		want: &envoy_config_listener_v3.Listener{
+			Name:    "stats-om-enforced",
+			Address: SocketAddress("127.0.0.127", 8123),
+			FilterChains: []*envoy_config_listener_v3.FilterChain{{
+				Filters: []*envoy_config_listener_v3.Filter{{
+					Name: wellknown.HTTPConnectionManager,
+					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
+						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
+							StatPrefix: "stats",
+							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
+								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
+									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
+										Name:    "backend",
+										Domains: []string{"*"},
+										Routes:  []*envoy_config_route_v3.Route{route("/stats"), route("/stats/prometheus")},
+									}},
+								},
+							},
+							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
+								Name: wellknown.Router,
+								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
+									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
+								},
+							}},
+							NormalizePath: wrapperspb.Bool(true),
+						}),
+					},
+				}},
+				TransportSocket: DownstreamTLSTransportSocket(
+					&envoy_transport_socket_tls_v3.DownstreamTlsContext{
+						CommonTlsContext: &envoy_transport_socket_tls_v3.CommonTlsContext{
+							TlsParams: &envoy_transport_socket_tls_v3.TlsParameters{
+								TlsMinimumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
+								TlsMaximumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
+							},
+							TlsCertificateSdsSecretConfigs: []*envoy_transport_socket_tls_v3.SdsSecretConfig{{
+								Name:      "metrics-tls-certificate",
+								SdsConfig: ConfigSource("contour"),
+							}},
+							ValidationContextType: &envoy_transport_socket_tls_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
+								ValidationContextSdsSecretConfig: &envoy_transport_socket_tls_v3.SdsSecretConfig{
+									Name:      "metrics-ca-certificate",
+									SdsConfig: ConfigSource("contour"),
+								},
+							},
+						},
+						RequireClientCertificate: wrapperspb.Bool(true),
+					},
+				),
+			}},
+			SocketOptions: NewSocketOptions().TCPKeepalive().Build(),
+		},
+	})
+
+	run(t, "metrics-routes-tls-with-ca-health-ignore-om-limits", testcase{
+		address: "127.0.0.127",
+		port:    8123,
+		opts: []ListenerOption{
+			MetricsRouting(),
+			MetricsTLS("cabundle"),
+			HealthRouting(),
+			IgnoreOverloadManagerLimits(),
+		},
+		want: &envoy_config_listener_v3.Listener{
+			Name:    "stats-health",
+			Address: SocketAddress("127.0.0.127", 8123),
+			FilterChains: []*envoy_config_listener_v3.FilterChain{{
+				Filters: []*envoy_config_listener_v3.Filter{{
+					Name: wellknown.HTTPConnectionManager,
+					ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
+						TypedConfig: protobuf.MustMarshalAny(&envoy_filter_network_http_connection_manager_v3.HttpConnectionManager{
+							StatPrefix: "stats",
+							RouteSpecifier: &envoy_filter_network_http_connection_manager_v3.HttpConnectionManager_RouteConfig{
+								RouteConfig: &envoy_config_route_v3.RouteConfiguration{
+									VirtualHosts: []*envoy_config_route_v3.VirtualHost{{
+										Name:    "backend",
+										Domains: []string{"*"},
+										Routes:  []*envoy_config_route_v3.Route{route("/ready"), route("/stats"), route("/stats/prometheus")},
+									}},
+								},
+							},
+							HttpFilters: []*envoy_filter_network_http_connection_manager_v3.HttpFilter{{
+								Name: wellknown.Router,
+								ConfigType: &envoy_filter_network_http_connection_manager_v3.HttpFilter_TypedConfig{
+									TypedConfig: protobuf.MustMarshalAny(&envoy_filter_http_router_v3.Router{}),
+								},
+							}},
+							NormalizePath: wrapperspb.Bool(true),
+						}),
+					},
+				}},
+				TransportSocket: DownstreamTLSTransportSocket(
+					&envoy_transport_socket_tls_v3.DownstreamTlsContext{
+						CommonTlsContext: &envoy_transport_socket_tls_v3.CommonTlsContext{
+							TlsParams: &envoy_transport_socket_tls_v3.TlsParameters{
+								TlsMinimumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
+								TlsMaximumProtocolVersion: envoy_transport_socket_tls_v3.TlsParameters_TLSv1_3,
+							},
+							TlsCertificateSdsSecretConfigs: []*envoy_transport_socket_tls_v3.SdsSecretConfig{{
+								Name:      "metrics-tls-certificate",
+								SdsConfig: ConfigSource("contour"),
+							}},
+							ValidationContextType: &envoy_transport_socket_tls_v3.CommonTlsContext_ValidationContextSdsSecretConfig{
+								ValidationContextSdsSecretConfig: &envoy_transport_socket_tls_v3.SdsSecretConfig{
+									Name:      "metrics-ca-certificate",
+									SdsConfig: ConfigSource("contour"),
+								},
+							},
+						},
+						RequireClientCertificate: wrapperspb.Bool(true),
+					},
+				),
+			}},
+			SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
+			IgnoreGlobalConnLimit: true,
+		},
 	})
 }

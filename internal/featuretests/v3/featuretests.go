@@ -45,9 +45,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	contour_v1 "github.com/projectcontour/contour/apis/projectcontour/v1"
-	contour_v1alpha1 "github.com/projectcontour/contour/apis/projectcontour/v1alpha1"
 	"github.com/projectcontour/contour/internal/contour"
 	"github.com/projectcontour/contour/internal/dag"
+	envoy_v3 "github.com/projectcontour/contour/internal/envoy/v3"
 	"github.com/projectcontour/contour/internal/fixture"
 	"github.com/projectcontour/contour/internal/k8s"
 	"github.com/projectcontour/contour/internal/metrics"
@@ -94,10 +94,15 @@ func setup(t *testing.T, opts ...any) (ResourceEventHandlerWrapper, *Contour, fu
 	resources := []xdscache.ResourceCache{
 		xdscache_v3.NewListenerCache(
 			conf,
-			contour_v1alpha1.MetricsConfig{Address: "0.0.0.0", Port: 8002},
-			contour_v1alpha1.HealthConfig{Address: "0.0.0.0", Port: 8002},
-			0,
-			nil,
+			[]*envoy_v3.StatsListenerConfig{
+				envoy_v3.NewStatsListenerConfig(
+					"0.0.0.0",
+					8002,
+					envoy_v3.MetricsRouting(),
+					envoy_v3.HealthRouting(),
+					envoy_v3.IgnoreOverloadManagerLimits(),
+				),
+			},
 		),
 		&xdscache_v3.SecretCache{},
 		&xdscache_v3.RouteCache{},
