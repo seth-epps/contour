@@ -14,6 +14,9 @@
 package v3
 
 import (
+	"slices"
+	"strings"
+
 	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_config_listener_v3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	envoy_config_route_v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -28,10 +31,71 @@ import (
 	"github.com/projectcontour/contour/internal/protobuf"
 )
 
+type StatsListenerConfig struct {
+	address        string
+	port           int
+	classes        []listenerClass
+	metricsTLS     bool
+	metricsCA      string
+	ignoreOMLimits bool
+}
+
+type (
+	listenerClass  string
+	ListenerOption func(l *StatsListenerConfig)
+)
+
 const (
 	metricsServerCertSDSName = "metrics-tls-certificate"
 	metricsCaBundleSDSName   = "metrics-ca-certificate"
+
+	metricsClass listenerClass = "stats" // `stats` retains the old listener naming conventions
+	healthClass  listenerClass = "health"
+	adminClass   listenerClass = "envoy-admin"
 )
+
+func NewStatsListenerConfig(address string, port int, opts ...ListenerOption) *StatsListenerConfig {
+	l := &StatsListenerConfig{
+		address: address,
+		port:    port,
+	}
+	for _, o := range opts {
+		o(l)
+	}
+
+	return l
+}
+
+func MetricsRouting() ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.classes = append(l.classes, metricsClass)
+	}
+}
+
+func HealthRouting() ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.classes = append(l.classes, healthClass)
+	}
+}
+
+func AdminRouting() ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.classes = append(l.classes, adminClass)
+	}
+}
+
+func MetricsTLS(caFile string) ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.metricsTLS = true
+		l.metricsCA = caFile
+	}
+}
+
+func IgnoreOverloadManagerLimits() ListenerOption {
+	return func(l *StatsListenerConfig) {
+		l.ignoreOMLimits = true
+	}
+}
 
 // StatsListeners returns an array of *envoy_config_listener_v3.Listeners,
 // either single HTTP listener or HTTP and HTTPS listeners depending on config.
@@ -128,6 +192,62 @@ func AdminListener(port int) *envoy_config_listener_v3.Listener {
 		),
 		SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
 		IgnoreGlobalConnLimit: true,
+	}
+}
+
+func (stats *StatsListenerConfig) ToEnvoy() *envoy_config_listener_v3.Listener {
+	if len(stats.classes) == 0 {
+		return nil
+	}
+
+	var tlsTransportSocket *envoy_config_core_v3.TransportSocket
+	if slices.Contains(stats.classes, metricsClass) && stats.metricsTLS {
+		tlsTransportSocket = DownstreamTLSTransportSocket(
+			downstreamTLSContext(stats.metricsCA != ""))
+	}
+
+	var classesAsString []string
+	var prefixes []string
+	for _, cls := range stats.classes {
+		classesAsString = append(classesAsString, string(cls))
+		switch cls {
+		case metricsClass:
+			prefixes = append(prefixes, "/stats", "/stats/prometheus")
+		case healthClass:
+			prefixes = append(prefixes, "/ready")
+		case adminClass:
+			prefixes = append(
+				prefixes,
+				"/certs",
+				"/clusters",
+				"/listeners",
+				"/config_dump",
+				"/memory",
+				"/ready",
+				"/runtime",
+				"/server_info",
+				"/stats",
+				"/stats/prometheus",
+				"/stats/recentlookups",
+			)
+		}
+	}
+
+	// Strip duplicate routes prefixes
+	slices.Sort(prefixes)
+	prefixes = slices.Compact(prefixes)
+
+	listenerName := strings.Join(classesAsString, "-")
+	if !stats.ignoreOMLimits {
+		listenerName += "-om-enforced"
+	}
+
+	return &envoy_config_listener_v3.Listener{
+		Name:                  listenerName,
+		Address:               SocketAddress(stats.address, stats.port),
+		SocketOptions:         NewSocketOptions().TCPKeepalive().Build(),
+		FilterChains:          filterChain("stats", tlsTransportSocket, routeForAdminInterface(prefixes...)),
+		IgnoreGlobalConnLimit: stats.ignoreOMLimits,
 	}
 }
 

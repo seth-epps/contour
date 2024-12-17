@@ -70,6 +70,7 @@ import (
 
 const (
 	initialDagBuildPollPeriod = 100 * time.Millisecond
+	adminListenerAddress      = "127.0.0.1"
 )
 
 // registerServe registers the serve subcommand and flags
@@ -493,8 +494,10 @@ func (s *Server) doServe() error {
 		endpointHandler = xdscache_v3.NewEndpointsTranslator(s.log.WithField("context", "endpointstranslator"))
 	}
 
+	slc := statsListenerConfigs(contourConfiguration)
+
 	resources := []xdscache.ResourceCache{
-		xdscache_v3.NewListenerCache(listenerConfig, *contourConfiguration.Envoy.Metrics, *contourConfiguration.Envoy.Health, *contourConfiguration.Envoy.Network.EnvoyAdminPort, contourConfiguration.Envoy.OMEnforcedHealth),
+		xdscache_v3.NewListenerCache(listenerConfig, slc),
 		xdscache_v3.NewSecretsCache(envoy_v3.StatsSecrets(contourConfiguration.Envoy.Metrics.TLS)),
 		&xdscache_v3.RouteCache{},
 		&xdscache_v3.ClusterCache{},
@@ -1223,4 +1226,69 @@ func (s *Server) informOnResource(obj client.Object, handler cache.ResourceEvent
 
 	s.handlerCacheSyncs = append(s.handlerCacheSyncs, registration.HasSynced)
 	return nil
+}
+
+func statsListenerConfigs(cfg contour_v1alpha1.ContourConfigurationSpec) []*envoy_v3.StatsListenerConfig {
+	var configs []*envoy_v3.StatsListenerConfig
+
+	// At a minimum we construct base metrics and health listeners
+	switch {
+	case cfg.Envoy.Metrics.TLS == nil &&
+		(cfg.Envoy.Metrics.Address == cfg.Envoy.Health.Address) &&
+		(cfg.Envoy.Metrics.Port == cfg.Envoy.Health.Port):
+		configs = append(
+			configs,
+			envoy_v3.NewStatsListenerConfig(
+				cfg.Envoy.Metrics.Address,
+				cfg.Envoy.Metrics.Port,
+				envoy_v3.MetricsRouting(),
+				envoy_v3.HealthRouting(),
+				envoy_v3.IgnoreOverloadManagerLimits(),
+			),
+		)
+	default:
+		metricsOpts := []envoy_v3.ListenerOption{envoy_v3.MetricsRouting(), envoy_v3.IgnoreOverloadManagerLimits()}
+		if cfg.Envoy.Metrics.TLS != nil {
+			metricsOpts = append(metricsOpts, envoy_v3.MetricsTLS(cfg.Envoy.Metrics.TLS.CAFile))
+		}
+
+		healthOpts := []envoy_v3.ListenerOption{envoy_v3.HealthRouting(), envoy_v3.IgnoreOverloadManagerLimits()}
+		configs = append(
+			configs,
+			envoy_v3.NewStatsListenerConfig(
+				cfg.Envoy.Metrics.Address,
+				cfg.Envoy.Metrics.Port,
+				metricsOpts...,
+			),
+			envoy_v3.NewStatsListenerConfig(
+				cfg.Envoy.Health.Address,
+				cfg.Envoy.Health.Port,
+				healthOpts...,
+			),
+		)
+	}
+
+	if cfg.Envoy.Network.EnvoyAdminPort != nil && *cfg.Envoy.Network.EnvoyAdminPort > 0 {
+		configs = append(
+			configs,
+			envoy_v3.NewStatsListenerConfig(
+				adminListenerAddress,
+				*cfg.Envoy.Network.EnvoyAdminPort,
+				envoy_v3.AdminRouting(),
+				envoy_v3.IgnoreOverloadManagerLimits(),
+			),
+		)
+	}
+
+	if cfg.Envoy.OMEnforcedHealth != nil {
+		configs = append(configs,
+			envoy_v3.NewStatsListenerConfig(
+				cfg.Envoy.OMEnforcedHealth.Address,
+				cfg.Envoy.OMEnforcedHealth.Port,
+				envoy_v3.HealthRouting(),
+			),
+		)
+	}
+
+	return configs
 }

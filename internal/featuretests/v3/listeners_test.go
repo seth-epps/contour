@@ -48,10 +48,16 @@ func customAdminPort(t *testing.T, port int) []xdscache.ResourceCache {
 	return []xdscache.ResourceCache{
 		xdscache_v3.NewListenerCache(
 			conf,
-			contour_v1alpha1.MetricsConfig{Address: "0.0.0.0", Port: 8002},
-			contour_v1alpha1.HealthConfig{Address: "0.0.0.0", Port: 8002},
-			port,
-			nil,
+			[]*envoy_v3.StatsListenerConfig{
+				envoy_v3.NewStatsListenerConfig(
+					"0.0.0.0",
+					8002,
+					envoy_v3.MetricsRouting(),
+					envoy_v3.HealthRouting(),
+					envoy_v3.IgnoreOverloadManagerLimits(),
+				),
+				envoy_v3.NewStatsListenerConfig("127.0.0.1", port, envoy_v3.AdminRouting(), envoy_v3.IgnoreOverloadManagerLimits()),
+			},
 		),
 		&xdscache_v3.SecretCache{},
 		&xdscache_v3.RouteCache{},
